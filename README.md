@@ -18,6 +18,10 @@ FastAPI 기반 AI 챗봇 서버입니다. Spring Boot에서 스티커(리뷰) �
    ```
 5) 실행: `uvicorn main:app --reload --host 0.0.0.0 --port 8000`
 
+## Dependencies (requirements.txt)
+- 의존성 설치: `pip install -r requirements.txt`
+- 새 패키지 추가 후 버전 고정: `pip freeze > requirements.txt`로 갱신해 팀원이 같은 버전으로 맞출 수 있게 유지하세요.
+
 ## API
 - `GET /` : 헬스 체크
 - `POST /api/deals/{deal_id}/chatbot`
