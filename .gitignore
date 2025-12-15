@@ -1,0 +1,16 @@
+# Python virtual environment
+venv/
+     
+# Byte-code files
+__pycache__/
+*.pyc
+*.pyo
+     
+# Environment variables (sensitive information)
+.env
+    
+# Editor backup files
+*~
+*.bak
+*.swp
+.DS_Store # macOS specific
