@@ -21,6 +21,19 @@ FastAPI 기반 AI 챗봇 서버입니다. Spring Boot에서 스티커(리뷰) �
 ## Dependencies (requirements.txt)
 - 의존성 설치: `pip install -r requirements.txt`
 - 새 패키지 추가 후 버전 고정: `pip freeze > requirements.txt`로 갱신해 팀원이 같은 버전으로 맞출 수 있게 유지하세요.
+- 아래 순서에 맞춰서 설치
+```
+brew install python@3.11          # 없다면 설치
+python3.11 --version               # 3.11.x 확인
+cd /Users/leejinhyung/ssafy/finalProject/ai-server
+rm -rf .venv                       # 기존 3.9 venv 제거
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install "numpy<2" "importlib-metadata>=6.0"
+python -m pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
 
 ## API
 - `GET /` : 헬스 체크
