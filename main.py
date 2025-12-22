@@ -51,14 +51,14 @@ collection = client.get_or_create_collection(
 # --- Pydantic 모델 정의 ---
 
 class IndexRequest(BaseModel):
-    deal_id: int
+    apt_id: str
 
 class StickerData(BaseModel):
     stickerId: int
     description: str
 
 class IndexDataRequest(BaseModel):
-    deal_id: int
+    apt_id: str
     stickers: list[StickerData]
 
 class ChatbotRequest(BaseModel):
@@ -79,11 +79,12 @@ async def index_reviews_with_data(request: IndexDataRequest):
     """
     Spring 서버로부터 직접 리뷰 데이터를 받아 Vector DB에 저장(인덱싱)합니다.
     """
-    deal_id = request.deal_id
+    apt_id = request.apt_id
+    #deal_id = request.deal_id
     stickers_data = request.stickers
 
     if not stickers_data:
-        return {"message": f"Deal ID {deal_id}에 대한 유효한 리뷰가 없어 인덱싱할 내용이 없습니다."}
+        return {"message": f"Deal ID {apt_id}에 대한 유효한 리뷰가 없어 인덱싱할 내용이 없습니다."}
 
     # 인덱싱할 문서, 메타데이터, ID 리스트 준비
     documents = []
@@ -92,7 +93,7 @@ async def index_reviews_with_data(request: IndexDataRequest):
 
     for sticker in stickers_data:
         documents.append(sticker.description)
-        metadatas.append({"deal_id": deal_id})
+        metadatas.append({"apt_id": apt_id})
         ids.append(f"sticker_{sticker.stickerId}") # 각 문서를 고유하게 식별할 ID
 
     # ChromaDB에 데이터 추가/업데이트 (Upsert)
@@ -102,11 +103,11 @@ async def index_reviews_with_data(request: IndexDataRequest):
         metadatas=metadatas
     )
     
-    return {"message": f"Deal ID {deal_id}에 대한 {len(documents)}개의 리뷰가 성공적으로 인덱싱되었습니다."}
+    return {"message": f"Deal ID {apt_id}에 대한 {len(documents)}개의 리뷰가 성공적으로 인덱싱되었습니다."}
 
 
-@app.post("/api/deals/{deal_id}/chatbot", response_model=ChatbotResponse)
-async def get_chatbot_answer(deal_id: int, request: ChatbotRequest):
+@app.post("/api/apartments/{apt_id}/chatbot", response_model=ChatbotResponse)
+async def get_chatbot_answer(apt_id: str, request: ChatbotRequest):
     """
     사용자 질문을 기반으로 Vector DB에서 관련 리뷰를 검색하고,
     이를 바탕으로 Gemini 모델이 답변을 생성합니다.
@@ -123,7 +124,7 @@ async def get_chatbot_answer(deal_id: int, request: ChatbotRequest):
     results = collection.query(
         query_embeddings=[question_embedding],
         n_results=3,
-        where={"deal_id": deal_id} # 필터링 조건
+        where={"apt_id": apt_id} # 필터링 조건
     )
     
     retrieved_documents = results['documents'][0]
