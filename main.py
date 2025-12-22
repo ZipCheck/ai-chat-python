@@ -51,18 +51,22 @@ collection = client.get_or_create_collection(
 # --- Pydantic 모델 정의 ---
 
 class IndexRequest(BaseModel):
-    deal_id: int
+    apt_seq: str
 
 class StickerData(BaseModel):
     stickerId: int
     description: str
 
 class IndexDataRequest(BaseModel):
-    deal_id: int
+    apt_seq: str
     stickers: list[StickerData]
 
 class ChatbotRequest(BaseModel):
     question: str
+
+class ReportRequest(BaseModel):
+    question: str
+    stickers: list[StickerData]
 
 class ChatbotResponse(BaseModel):
     answer: str
@@ -79,11 +83,11 @@ async def index_reviews_with_data(request: IndexDataRequest):
     """
     Spring 서버로부터 직접 리뷰 데이터를 받아 Vector DB에 저장(인덱싱)합니다.
     """
-    deal_id = request.deal_id
+    apt_seq = request.apt_seq
     stickers_data = request.stickers
 
     if not stickers_data:
-        return {"message": f"Deal ID {deal_id}에 대한 유효한 리뷰가 없어 인덱싱할 내용이 없습니다."}
+        return {"message": f"Apt Seq {apt_seq}에 대한 유효한 리뷰가 없어 인덱싱할 내용이 없습니다."}
 
     # 인덱싱할 문서, 메타데이터, ID 리스트 준비
     documents = []
@@ -92,7 +96,7 @@ async def index_reviews_with_data(request: IndexDataRequest):
 
     for sticker in stickers_data:
         documents.append(sticker.description)
-        metadatas.append({"deal_id": deal_id})
+        metadatas.append({"apt_seq": apt_seq})
         ids.append(f"sticker_{sticker.stickerId}") # 각 문서를 고유하게 식별할 ID
 
     # ChromaDB에 데이터 추가/업데이트 (Upsert)
@@ -102,68 +106,54 @@ async def index_reviews_with_data(request: IndexDataRequest):
         metadatas=metadatas
     )
     
-    return {"message": f"Deal ID {deal_id}에 대한 {len(documents)}개의 리뷰가 성공적으로 인덱싱되었습니다."}
+    return {"message": f"Apt Seq {apt_seq}에 대한 {len(documents)}개의 리뷰가 성공적으로 인덱싱되었습니다."}
 
 
-@app.post("/api/deals/{deal_id}/chatbot", response_model=ChatbotResponse)
-async def get_chatbot_answer(deal_id: int, request: ChatbotRequest):
+@app.post("/api/apartments/{apt_seq}/chatbot", response_model=ChatbotResponse)
+async def generate_apt_report(apt_seq: str, request: ReportRequest):
     """
-    사용자 질문을 기반으로 Vector DB에서 관련 리뷰를 검색하고,
-    이를 바탕으로 Gemini 모델이 답변을 생성합니다.
+    Spring 서버로부터 받은 aptSeq, 질문, 스티커 데이터를 기반으로
+    아파트 단지에 대한 종합적인 분석 리포트를 생성합니다.
     """
-    # [Step 1] 사용자 질문을 벡터로 변환 (Embedding)
-    question_embedding = genai.embed_content(
-        model="models/embedding-001",
-        content=request.question,
-        task_type="RETRIEVAL_QUERY"
-    )[ "embedding"]
+    stickers_data = request.stickers
+    question = request.question
 
-    # [Step 2] Vector DB에서 관련 문서 검색 (Retrieval)
-    # 해당 deal_id를 가진 리뷰 중에서 질문과 유사한 3개 문서를 찾음
-    results = collection.query(
-        query_embeddings=[question_embedding],
-        n_results=3,
-        where={"deal_id": deal_id} # 필터링 조건
-    )
-    
-    retrieved_documents = results['documents'][0]
+    # 스티커 데이터가 없는 경우 처리
+    if not stickers_data:
+        return {"answer": "분석할 스티커 리뷰 데이터가 없습니다.", "score": 0}
 
-    # 검색된 리뷰가 없는 경우
-    if not retrieved_documents:
-        return {"answer": "아직 이 매물에 대한 주민들의 상세한 정보가 없거나, 질문과 관련된 리뷰를 찾지 못했어요.", "score": 0}
+    # [Step 1] Context 구성 (Sticker 데이터를 텍스트로 변환)
+    context = "\n".join([sticker.description for sticker in stickers_data])
 
-    # [Step 3] 검색된 리뷰를 바탕으로 Context 구성 (Augmentation)
-    context = "\n".join(retrieved_documents)
+    print(f"리포트 요청 apt_seq: {apt_seq}") # DEBUG
 
-    # [Step 4] LLM 프롬프트 구성 (Prompt Engineering)
+    # [Step 2] LLM 프롬프트 구성
     prompt = f"""
-    너는 특정 매물에 대한 실제 주민 리뷰를 바탕으로 질문에 답변해주는 친절한 AI 부동산 요정이야. 
-    아래 [리뷰 내용]을 참고해서 사용자의 [질문]에 답해줘. 리뷰 내용은 주민들이 직접 작성한 후기야.
+    너는 아파트 단지 거주 환경을 분석해주는 AI 전문가야.
+    아래 [주민들의 스티커 리뷰]를 종합적으로 분석해서, 사용자의 [질문]에 맞춰 보고서를 작성해줘.
 
     **응답 형식:**
     결과는 반드시 다음 JSON 형식으로 출력해줘:
     {{
-        "answer": "답변 내용 (좋았던점과 나쁜점을 구분하여 포함)",
-        "score": 85 (0~100점 사이 정수)
+        "answer": "보고서 내용 (요약 및 분석)",
+        "score": 85 (0~100점 사이 정수, 거주 만족도 점수)
     }}
     반드시 순수한 JSON 문자열만 출력해. 마크다운 코드 블록(```json)이나 기타 설명은 절대 포함하지 마.
 
     [지시사항]
-    1. 'answer' 필드에 답변할때 **좋았던점**과 **나쁜점**을 개행으로 구분해서 작성해줘.
-    2. **답변은 최대한 구체적이고 상세하게 작성해줘. 단순히 한두 줄로 끝내지 말고, 리뷰 내용을 충분히 인용해서 각 항목(좋았던점, 나쁜점)당 최소 3문장 이상으로 풍부하게 설명해줘.**
-    3. 'score' 필드에는 좋은점과 나쁜점의 비율을 계산해서 0~100점 사이의 정수 점수를 산정해줘.
+    1. '{apt_seq} 아파트 단지에 대한 주민들의 스티커 리뷰들을 종합적으로 요약하고, 전반적인 거주 환경에 대한 보고서를 작성해줘.' 라는 목표에 맞춰 답변해줘.
+    2. 주민들의 리뷰 내용을 바탕으로 **장점**과 **단점**을 명확하게 파악하고, 이를 종합하여 서술해줘.
+    3. **단순 나열이 아닌, '교통이 편리하지만 소음이 있다'와 같이 유기적인 문장으로 작성해줘.**
+    4. 'score' 필드에는 리뷰의 긍정/부정 비율을 고려하여 0~100점 사이의 거주 만족도 점수를 산정해줘.
     
-    만약 리뷰 내용으로 알 수 없는 질문이라면, 절대로 내용을 지어내지 말고 
-    "죄송하지만 해당 정보는 리뷰에 없어서 답변해드리기 어려워요." 라고 answer 필드에 솔직하게 말하고, score 필드는 0으로 줘.
-
-    [리뷰 내용]
+    [주민들의 스티커 리뷰]
     {context}
 
     [질문]
-    {request.question}
+    {question}
     """
 
-    # [Step 5] Gemini 모델에게 질문하고 답변 받기 (Generation)
+    # [Step 3] Gemini 모델에게 요청 (Generation)
     try:
         generation_config = genai.types.GenerationConfig(
             response_mime_type="application/json"
@@ -173,7 +163,7 @@ async def get_chatbot_answer(deal_id: int, request: ChatbotRequest):
         # JSON 응답 파싱
         response_data = json.loads(ai_response.text)
         answer = response_data.get("answer", "AI 응답 파싱 오류.")
-        score = response_data.get("score", 0) # 파싱 오류 시 기본 점수 0
+        score = response_data.get("score", 0)
 
         return {"answer": answer, "score": score}
     except json.JSONDecodeError as e:
