@@ -1,82 +1,157 @@
+import os
+import json
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import os
-from dotenv import load_dotenv
+
+import google.generativeai as genai
+
+# --- 초기 설정 ---
 
 # .env 파일에서 환경 변수 로드
 load_dotenv()
 
+# FastAPI 앱 생성
 app = FastAPI()
 
-# 환경 변수 가져오기 (예: Spring 서버 URL, Gemini API Key)
+# 환경 변수 가져오기
 SPRING_BOOT_API_BASE_URL = os.getenv("SPRING_BOOT_API_BASE_URL", "http://localhost:8080")
-GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY") # Google API Key for Gemini
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not GEMINI_API_KEY:
     raise ValueError("GOOGLE_API_KEY 환경 변수가 설정되지 않았습니다.")
 
+# Google Gemini API 설정
+genai.configure(api_key=GEMINI_API_KEY)
+
+# --- AI 모델 설정 ---
+
+# 사용할 Gemini 모델 설정
+generation_model = genai.GenerativeModel('gemini-2.5-flash')
+
+# --- Pydantic 모델 정의 ---
+
+class StickerData(BaseModel):
+    stickerId: int
+    description: str
+
 class ChatbotRequest(BaseModel):
+    apt_seq: str | None = None
     question: str
+    stickers: list[StickerData] | None = None
 
 class ChatbotResponse(BaseModel):
     answer: str
+    score: int
+
+# --- API 엔드포인트 ---
 
 @app.get("/")
 async def root():
     return {"message": "Python AI Server is running!"}
 
-@app.post("/api/deals/{deal_id}/chatbot", response_model=ChatbotResponse)
-async def get_chatbot_answer(deal_id: int, request: ChatbotRequest):
-    # [Step 1] Spring Boot에서 스티커(리뷰) 데이터 가져오기 (Retrieval)
-    spring_api_url = f"{SPRING_BOOT_API_BASE_URL}/api/stickers"
-    
-    try:
-        # Spring 서버에 GET 요청 보냄 (예: http://localhost:8080/api/stickers?dealId=1)
-        response = requests.get(spring_api_url, params={"dealId": deal_id})
-        response.raise_for_status() # 200 OK가 아니면 에러 발생
-        
-        # Spring에서 준 JSON 데이터 파싱 (Spring 응답 구조에 따라 수정 필요)
-        # 예: {"data": [{"description": "조용해요"}, ...]} 라고 가정
-        api_result = response.json()
-        stickers_data = api_result.get("data", []) 
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Spring Boot 통신 오류: {e}")
-        return {"answer": "죄송해요, 매물 정보를 가져오는 중에 문제가 생겼어요."}
 
-    # 데이터가 아예 없는 경우 처리
-    if not stickers_data:
-        return {"answer": "아직 이 매물에 대한 주민들의 상세한 정보가 없어요."}
-    
-    # [Step 2] 스티커 설명들을 하나의 긴 문자열로 합치기 (Context 구성)
-    # 리스트에 있는 description만 뽑아서 줄바꿈(\n)으로 연결
-    context = "\n".join([s.get("description", "") for s in stickers_data if s.get("description")])
+@app.post("/api/apartments/{apt_id}/chatbot", response_model=ChatbotResponse)
+async def get_chatbot_answer(apt_id: str, request: ChatbotRequest):
+    """
+    사용자 질문을 기반으로 Gemini 모델이 답변을 생성합니다.
+    """
+    stickers_count = len(request.stickers) if request.stickers else 0
+    print(
+        "[chatbot] "
+        f"apt_id={apt_id} apt_seq={request.apt_seq} "
+        f"question={request.question} stickers_count={stickers_count}"
+    )
+    if request.stickers:
+        print(f"[chatbot] stickers={request.stickers}")
 
-    if not context.strip():
-        return {"answer": "아직 이 매물에 대한 유효한 주민 리뷰 내용이 없어요."}
+    stickers_text = "\n".join(
+        f"- {sticker.description}" for sticker in (request.stickers or [])
+    )
 
-    # [Step 3] LLM 프롬프트 만들기 (Prompt Engineering)
-    # AI에게 역할(Persona)과 데이터(Context)를 줌
+    # [Step 1] LLM 프롬프트 구성 (Prompt Engineering)
     prompt = f"""
-    너는 특정 매물에 대한 실제 주민 리뷰를 바탕으로 질문에 답변해주는 친절한 AI 부동산 요정이야. 
-    아래 [리뷰 내용]을 참고해서 사용자의 [질문]에 답해줘. 
-    
-    만약 리뷰 내용으로 알 수 없는 질문이라면, 지어내지 말고 
-    "죄송하지만 해당 정보는 리뷰에 없어서 답변해드리기 어려워요." 라고 솔직하게 말해줘.
+        너는 부동산 관련 질문에 답변해주는 친절한 AI야.
 
-    [리뷰 내용]
-    {context}
+        아래에 제공되는 [리뷰/스티커 내용]만을 근거로 답변해야 해.
+        다른 일반 지식이나 추측은 절대 사용하지 마.
+        매물 ID는 참고용일 뿐이며, 매물의 상세 정보는 제공되지 않았어.
+
+        만약 질문에 답하기에 충분한 정보가 없다면,
+        절대로 내용을 지어내지 말고 아래 문장을 그대로 사용해:
+        "죄송하지만 해당 정보는 제공되지 않아서 답변해드리기 어려워요."
+
+        ---
+
+        ### [출력 형식 – 매우 중요]
+
+        반드시 **아래 JSON 형식 그대로** 출력해.
+        - JSON 외의 텍스트, 설명, 마크다운(```), 코드블록을 **절대 포함하지 마**
+        - JSON은 **반드시 한 줄**로 출력
+        - 문자열 안에서 줄바꿈은 `\\n` 으로 표현
+        - 큰따옴표가 필요하면 `\\\"` 로 이스케이프
+
+        출력 예시는 형식 참고용이며, 그대로 복사하지 마:
+        {{
+            "answer":"좋았던점: ... \\n나쁜점: ...",
+            "score":85
+        }}
+
+        ---
+
+        ### [answer 작성 규칙]
+
+        1. answer에는 반드시 아래 두 항목을 포함해야 해:
+        - **좋았던점**
+        - **나쁜점**
+        2. 두 항목은 반드시 `\\n`(개행)으로 구분해서 작성해.
+        3. 리뷰/스티커 내용이 충분하다면:
+        - 너무 구체적이지도, 너무 짧지도 않게 **중간 수준으로 요약**
+        4. 리뷰/스티커 내용이 매우 적다면:
+        - 각 항목을 **1~2문장 정도로 간단히 요약**
+
+        ---
+
+        ### [score 산정 규칙]
+
+        - score는 0~100 사이의 정수여야 해
+        - 리뷰/스티커에서 나타난 **긍정 요소와 부정 요소의 비율**을 기준으로 점수를 계산해
+        - 긍정이 많을수록 높은 점수, 부정이 많을수록 낮은 점수
+        - 정보 부족으로 답변할 수 없는 경우:
+        - answer는 지정된 사과 문구 사용
+        - score는 반드시 0
+
+
+    [리뷰/스티커 내용]
+    {stickers_text}
+
+    [매물 ID]
+    {apt_id}
 
     [질문]
     {request.question}
-
-    [답변]
     """
+    
 
-    # [Step 4] Gemini에게 질문하고 답 받기 (Generation)
+    # [Step 2] Gemini 모델에게 질문하고 답변 받기 (Generation)
     try:
-        ai_response = model.generate_content(prompt)
-        return {"answer": ai_response.text}
+        generation_config = genai.types.GenerationConfig(
+            response_mime_type="application/json"
+        )
+        ai_response = generation_model.generate_content(prompt, generation_config=generation_config)
+        
+        # JSON 응답 파싱
+        response_data = json.loads(ai_response.text)
+        answer = response_data.get("answer", "AI 응답 파싱 오류.")
+        answer = answer.replace("\\n", "\n")
+        if "좋았던점" in answer and "나쁜점" in answer and "\n" not in answer:
+            answer = answer.replace("나쁜점", "\n나쁜점", 1)
+        score = response_data.get("score", 0) # 파싱 오류 시 기본 점수 0
+
+        return {"answer": answer, "score": score}
+    except json.JSONDecodeError as e:
+        print(f"JSON 파싱 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail="AI 응답을 파싱하는 중 오류가 발생했습니다.")
     except Exception as e:
         print(f"Gemini API 호출 중 오류 발생: {e}")
         raise HTTPException(status_code=500, detail="AI 답변 생성 중 오류가 발생했습니다.")
